@@ -362,11 +362,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
         const result = await pdfProcessor.extractSection(id, title, page, charsPerPage);
 
-        let responseText = `Section: ${result.section}\nPage ${result.page} of ${result.totalPages}\n\n${result.content}`;
-
-        if (result.page < result.totalPages) {
-          responseText += `\n\n---\nTo continue reading, use: section('${id}', '${title}', ${result.page + 1})`;
-        }
+        const responseText = `Section: ${result.section}\nPage ${result.page} of ${result.totalPages}\n\n${result.content}`;
 
         return {
           content: [
