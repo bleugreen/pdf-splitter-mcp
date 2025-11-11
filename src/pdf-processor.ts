@@ -58,6 +58,13 @@ interface RenderedPage {
   dpi: number;
 }
 
+interface SectionPage {
+  page: number;
+  totalPages: number;
+  content: string;
+  section: string;
+}
+
 export class PDFProcessor {
   private readonly loadedPDFs: Map<string, LoadedPDF> = new Map();
   private readonly cacheDir: string;
@@ -418,7 +425,12 @@ export class PDFProcessor {
     return markdown.trim();
   }
 
-  async extractSection(pdfId: string, sectionTitle: string): Promise<string> {
+  async extractSection(
+    pdfId: string,
+    sectionTitle: string,
+    page: number = 1,
+    charsPerPage: number = 4000
+  ): Promise<SectionPage> {
     const pdf = this.loadedPDFs.get(pdfId);
     if (!pdf) {
       throw new Error("PDF not found. Please load it first.");
@@ -430,6 +442,7 @@ export class PDFProcessor {
     let sectionStart = -1;
     let sectionLevel = 0;
     let sectionEnd = lines.length;
+    let matchedTitle = "";
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -443,6 +456,7 @@ export class PDFProcessor {
           if (title.includes(normalizedQuery) || normalizedQuery.includes(title)) {
             sectionStart = i;
             sectionLevel = level;
+            matchedTitle = headingMatch[2];
           }
         } else {
           if (level <= sectionLevel) {
@@ -461,7 +475,67 @@ export class PDFProcessor {
       throw new Error(`Section "${sectionTitle}" not found in outline.${suggestionText}`);
     }
 
-    return lines.slice(sectionStart, sectionEnd).join('\n').trim();
+    const fullContent = lines.slice(sectionStart, sectionEnd).join('\n').trim();
+
+    const pages = this.paginateContent(fullContent, charsPerPage);
+
+    if (page < 1 || page > pages.length) {
+      throw new Error(`Page ${page} out of range. Section has ${pages.length} page(s).`);
+    }
+
+    return {
+      page,
+      totalPages: pages.length,
+      content: pages[page - 1],
+      section: matchedTitle,
+    };
+  }
+
+  private paginateContent(content: string, charsPerPage: number): string[] {
+    if (content.length <= charsPerPage) {
+      return [content];
+    }
+
+    const pages: string[] = [];
+    const paragraphs = content.split('\n\n');
+
+    let currentPage = '';
+
+    for (let i = 0; i < paragraphs.length; i++) {
+      const paragraph = paragraphs[i];
+      const isHeading = paragraph.match(/^#+\s/);
+      const nextParagraph = paragraphs[i + 1];
+
+      if (currentPage.length === 0) {
+        currentPage = paragraph;
+
+        if (isHeading && nextParagraph && currentPage.length + nextParagraph.length + 2 <= charsPerPage) {
+          currentPage += '\n\n' + nextParagraph;
+          i++;
+        }
+      } else if (currentPage.length + paragraph.length + 2 <= charsPerPage) {
+        currentPage += '\n\n' + paragraph;
+
+        if (isHeading && nextParagraph && currentPage.length + nextParagraph.length + 2 <= charsPerPage) {
+          currentPage += '\n\n' + nextParagraph;
+          i++;
+        }
+      } else {
+        pages.push(currentPage);
+        currentPage = paragraph;
+
+        if (isHeading && nextParagraph && currentPage.length + nextParagraph.length + 2 <= charsPerPage) {
+          currentPage += '\n\n' + nextParagraph;
+          i++;
+        }
+      }
+    }
+
+    if (currentPage.length > 0) {
+      pages.push(currentPage);
+    }
+
+    return pages;
   }
 
   private findSimilarSections(markdown: string, query: string): string[] {
@@ -639,16 +713,15 @@ export class PDFProcessor {
 
   private formatOutlineAsText(items: OutlineItem[], indent: string = ""): string {
     let result = "";
-    
+
     for (const item of items) {
-      const pageInfo = item.page ? ` (Page ${item.page})` : "";
-      result += `${indent}${item.title}${pageInfo}\n`;
-      
+      result += `${indent}${item.title}\n`;
+
       if (item.children && item.children.length > 0) {
         result += this.formatOutlineAsText(item.children, indent + "  ");
       }
     }
-    
+
     return result;
   }
 

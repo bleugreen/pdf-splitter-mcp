@@ -19,20 +19,22 @@ async function testMarkdownConversion() {
 
   console.log("2. Testing section extraction...");
   try {
-    const section = await processor.extractSection(result.id, "Introduction");
+    const sectionPage = await processor.extractSection(result.id, "Introduction");
     console.log(`✓ Extracted "Introduction" section`);
-    console.log(`   Length: ${section.length} characters`);
-    console.log(`   Preview: ${section.substring(0, 200)}...\n`);
+    console.log(`   Page ${sectionPage.page} of ${sectionPage.totalPages}`);
+    console.log(`   Length: ${sectionPage.content.length} characters`);
+    console.log(`   Preview: ${sectionPage.content.substring(0, 200)}...\n`);
   } catch (error) {
     console.log(`   Note: ${error}\n`);
 
     console.log("   Trying first section from outline...");
     const firstSection = outlineLines[0].match(/^\s*(.+?)(\s+\(Page \d+\))?$/)?.[1];
     if (firstSection) {
-      const section = await processor.extractSection(result.id, firstSection);
+      const sectionPage = await processor.extractSection(result.id, firstSection);
       console.log(`✓ Extracted "${firstSection}" section`);
-      console.log(`   Length: ${section.length} characters`);
-      console.log(`   Preview: ${section.substring(0, 200)}...\n`);
+      console.log(`   Page ${sectionPage.page} of ${sectionPage.totalPages}`);
+      console.log(`   Length: ${sectionPage.content.length} characters`);
+      console.log(`   Preview: ${sectionPage.content.substring(0, 200)}...\n`);
     }
   }
 
@@ -49,9 +51,9 @@ async function testMarkdownConversion() {
 
   console.log("4. Testing fuzzy section matching...");
   try {
-    const section = await processor.extractSection(result.id, "scope");
+    const sectionPage = await processor.extractSection(result.id, "scope");
     console.log(`✓ Fuzzy matched "scope" to a section`);
-    console.log(`   First heading: ${section.split('\n')[0]}`);
+    console.log(`   First heading: ${sectionPage.content.split('\n')[0]}`);
   } catch (error) {
     console.log(`   ${error}`);
   }

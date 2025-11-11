@@ -55,7 +55,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "section",
-        description: "Extract a specific section by title (case-insensitive fuzzy match). Returns the section with all its content as markdown.",
+        description: "Extract a specific section by title (case-insensitive fuzzy match). Sections are automatically paginated for easier browsing. Returns page content, current page number, and total pages.",
         inputSchema: {
           type: "object",
           properties: {
@@ -66,6 +66,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             title: {
               type: "string",
               description: "Section title to extract (fuzzy matched against outline headings)",
+            },
+            page: {
+              type: "number",
+              description: "Page number to retrieve (1-indexed, default: 1). Use to browse through long sections.",
+              default: 1,
+            },
+            charsPerPage: {
+              type: "number",
+              description: "Characters per page for pagination (default: 4000). Splits at paragraph boundaries.",
+              default: 4000,
             },
           },
           required: ["id", "title"],
@@ -344,16 +354,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "section": {
-        const { id, title } = args as {
+        const { id, title, page = 1, charsPerPage = 4000 } = args as {
           id: string;
           title: string;
+          page?: number;
+          charsPerPage?: number;
         };
-        const content = await pdfProcessor.extractSection(id, title);
+        const result = await pdfProcessor.extractSection(id, title, page, charsPerPage);
+
+        let responseText = `Section: ${result.section}\nPage ${result.page} of ${result.totalPages}\n\n${result.content}`;
+
+        if (result.page < result.totalPages) {
+          responseText += `\n\n---\nTo continue reading, use: section('${id}', '${title}', ${result.page + 1})`;
+        }
+
         return {
           content: [
             {
               type: "text",
-              text: content,
+              text: responseText,
             },
           ],
         };
