@@ -1,8 +1,10 @@
-import { readFile } from "fs/promises";
-import { createHash } from "crypto";
+import { readFile, writeFile, mkdir } from "fs/promises";
 import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist/types/src/display/api";
 import { createCanvas } from "canvas";
+import path from "path";
+import os from "os";
+import { existsSync } from "fs";
 
 interface LoadedPDF {
   id: string;
@@ -57,24 +59,123 @@ interface RenderedPage {
 
 export class PDFProcessor {
   private readonly loadedPDFs: Map<string, LoadedPDF> = new Map();
+  private readonly cacheDir: string;
+  private readonly cacheFile: string;
 
-  async loadPDF(path: string): Promise<{ id: string; pageCount: number }> {
+  constructor() {
+    this.cacheDir = path.join(os.homedir(), '.pdf-splitter-mcp');
+    this.cacheFile = path.join(this.cacheDir, 'cache.json');
+  }
+
+  private generateUniqueId(filePath: string): string {
+    let normalizedPath: string;
+    let parts: string[];
+
+    if (filePath.startsWith('http://') || filePath.startsWith('https://')) {
+      try {
+        const url = new URL(filePath);
+        const urlPath = url.pathname;
+        parts = urlPath.split('/').filter(p => p.length > 0);
+        normalizedPath = filePath;
+      } catch {
+        normalizedPath = filePath;
+        parts = filePath.split('/').filter(p => p.length > 0);
+      }
+    } else {
+      normalizedPath = path.normalize(filePath);
+      parts = normalizedPath.split(path.sep).filter(p => p.length > 0);
+    }
+
+    if (parts.length === 0) {
+      return "unknown.pdf";
+    }
+
+    const existingPaths = new Map<string, string>();
+    for (const [id, pdf] of this.loadedPDFs.entries()) {
+      const pdfNormalizedPath = pdf.path.startsWith('http://') || pdf.path.startsWith('https://')
+        ? pdf.path
+        : path.normalize(pdf.path);
+      existingPaths.set(id, pdfNormalizedPath);
+    }
+
+    if (existingPaths.get(parts[parts.length - 1]) === normalizedPath) {
+      return parts[parts.length - 1];
+    }
+
+    const separator = filePath.startsWith('http://') || filePath.startsWith('https://') ? '/' : path.sep;
+
+    for (let i = 1; i <= parts.length; i++) {
+      const candidateId = parts.slice(-i).join(separator);
+
+      const existingPath = existingPaths.get(candidateId);
+      if (!existingPath) {
+        return candidateId;
+      }
+
+      if (existingPath === normalizedPath) {
+        return candidateId;
+      }
+    }
+
+    return parts.join(separator);
+  }
+
+  private async saveCache(): Promise<void> {
+    try {
+      if (!existsSync(this.cacheDir)) {
+        await mkdir(this.cacheDir, { recursive: true });
+      }
+
+      const cacheData = Array.from(this.loadedPDFs.values()).map(pdf => ({
+        id: pdf.id,
+        path: pdf.path,
+      }));
+
+      await writeFile(this.cacheFile, JSON.stringify(cacheData, null, 2), 'utf-8');
+    } catch (error) {
+      console.warn('Failed to save cache:', error);
+    }
+  }
+
+  async restoreCache(): Promise<void> {
+    try {
+      if (!existsSync(this.cacheFile)) {
+        return;
+      }
+
+      const cacheContent = await readFile(this.cacheFile, 'utf-8');
+      const cacheData = JSON.parse(cacheContent) as Array<{ id: string; path: string }>;
+
+      for (const item of cacheData) {
+        try {
+          await this.loadPDF(item.path);
+          console.error(`Restored PDF from cache: ${item.id}`);
+        } catch (error) {
+          console.warn(`Failed to restore PDF ${item.id}:`, error);
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to restore cache:', error);
+    }
+  }
+
+  async loadPDF(filePath: string): Promise<{ id: string; pageCount: number }> {
     try {
       let dataBuffer: Buffer;
-      
+
       // Check if the path is a URL
-      if (path.startsWith('http://') || path.startsWith('https://')) {
+      if (filePath.startsWith('http://') || filePath.startsWith('https://')) {
         // Fetch the PDF from URL
-        const response = await fetch(path);
+        const response = await fetch(filePath);
         if (!response.ok) {
           throw new Error(`Failed to fetch PDF from URL: ${response.status} ${response.statusText}`);
         }
-        
+
         const arrayBuffer = await response.arrayBuffer();
         dataBuffer = Buffer.from(arrayBuffer);
       } else {
         // Read from local file system
-        dataBuffer = await readFile(path);
+        dataBuffer = await readFile(filePath);
       }
       
       // Use pdfjs-dist for page extraction
@@ -141,18 +242,20 @@ export class PDFProcessor {
       }
       
       doc.destroy();
-      
-      const id = createHash("md5").update(path).digest("hex");
-      
+
+      const id = this.generateUniqueId(filePath);
+
       this.loadedPDFs.set(id, {
         id,
-        path,
+        path: filePath,
         pageCount: numPages,
         pages,
         metadata,
         outline,
       });
-      
+
+      await this.saveCache();
+
       return { id, pageCount: numPages };
     } catch (error) {
       throw new Error(`Failed to load PDF: ${error instanceof Error ? error.message : String(error)}`);
@@ -359,6 +462,14 @@ export class PDFProcessor {
       path: pdf.path,
       pageCount: pdf.pageCount,
     }));
+  }
+
+  async unloadPDF(pdfId: string): Promise<boolean> {
+    const removed = this.loadedPDFs.delete(pdfId);
+    if (removed) {
+      await this.saveCache();
+    }
+    return removed;
   }
 
   async extractOutline(pdfId: string): Promise<OutlineItem[] | null> {

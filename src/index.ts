@@ -41,7 +41,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: "load_pdf",
-        description: "Load a PDF file into memory for processing. Supports both local file paths and URLs (http/https)",
+        description: "Load a PDF file into memory for processing. Supports both local file paths and URLs (http/https). Returns a filename-based ID for subsequent operations.",
         inputSchema: {
           type: "object",
           properties: {
@@ -61,7 +61,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             pdfId: {
               type: "string",
-              description: "ID of the loaded PDF",
+              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
             },
             pageNumber: {
               type: "number",
@@ -79,7 +79,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             pdfId: {
               type: "string",
-              description: "ID of the loaded PDF",
+              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
             },
             startPage: {
               type: "number",
@@ -101,7 +101,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             pdfId: {
               type: "string",
-              description: "ID of the loaded PDF",
+              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
             },
             query: {
               type: "string",
@@ -129,7 +129,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             pdfId: {
               type: "string",
-              description: "ID of the loaded PDF",
+              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
             },
           },
           required: ["pdfId"],
@@ -144,6 +144,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "unload_pdf",
+        description: "Unload a PDF from memory",
+        inputSchema: {
+          type: "object",
+          properties: {
+            pdfId: {
+              type: "string",
+              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
+            },
+          },
+          required: ["pdfId"],
+        },
+      },
+      {
         name: "extract_outline",
         description: "Extract the document outline/TOC with page numbers",
         inputSchema: {
@@ -151,7 +165,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             pdfId: {
               type: "string",
-              description: "ID of the loaded PDF",
+              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
             },
           },
           required: ["pdfId"],
@@ -165,7 +179,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             pdfId: {
               type: "string",
-              description: "ID of the loaded PDF",
+              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
             },
           },
           required: ["pdfId"],
@@ -179,7 +193,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             pdfId: {
               type: "string",
-              description: "ID of the loaded PDF",
+              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
             },
             pageNumbers: {
               type: "array",
@@ -207,7 +221,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             pdfId: {
               type: "string",
-              description: "ID of the loaded PDF",
+              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
             },
             pageNumber: {
               type: "number",
@@ -238,7 +252,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             pdfId: {
               type: "string",
-              description: "ID of the loaded PDF",
+              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
             },
             pageNumber: {
               type: "number",
@@ -271,7 +285,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             pdfId: {
               type: "string",
-              description: "ID of the loaded PDF",
+              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
             },
             pageNumbers: {
               type: "array",
@@ -328,7 +342,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: `PDF loaded successfully. ID: ${result.id}, Pages: ${result.pageCount}`,
+              text: `PDF loaded successfully.\nID: ${result.id}\nPages: ${result.pageCount}\n\nUse this ID (${result.id}) in subsequent operations.`,
             },
           ],
         };
@@ -417,6 +431,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             },
           ],
         };
+      }
+
+      case "unload_pdf": {
+        const { pdfId } = args as { pdfId: string };
+        const removed = await pdfProcessor.unloadPDF(pdfId);
+        if (removed) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `PDF ${pdfId} unloaded successfully.`,
+              },
+            ],
+          };
+        } else {
+          throw new Error(`PDF ${pdfId} not found.`);
+        }
       }
 
       case "extract_outline": {
@@ -606,6 +637,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function main() {
+  await pdfProcessor.restoreCache();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("PDF Splitter MCP Server running on stdio");
