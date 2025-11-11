@@ -10,13 +10,14 @@ interface LoadedPDF {
   id: string;
   path: string;
   pageCount: number;
-  pages: string[];
+  markdown: string;
   metadata: any;
   outline?: OutlineItem[];
 }
 
 interface SearchResult {
   page: number;
+  section?: string;
   matches: Array<{
     text: string;
     context: string;
@@ -61,10 +62,30 @@ export class PDFProcessor {
   private readonly loadedPDFs: Map<string, LoadedPDF> = new Map();
   private readonly cacheDir: string;
   private readonly cacheFile: string;
+  private readonly fetchTimeout: number = 60000;
 
   constructor() {
     this.cacheDir = path.join(os.homedir(), '.pdf-splitter-mcp');
     this.cacheFile = path.join(this.cacheDir, 'cache.json');
+  }
+
+  private async fetchWithTimeout(url: string, timeoutMs?: number): Promise<Response> {
+    const timeout = timeoutMs || this.fetchTimeout;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+      console.error(`Fetching PDF from URL (timeout: ${timeout}ms)...`);
+      const response = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      return response;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error(`Fetch timeout after ${timeout}ms. The PDF URL may be slow or unreachable.`);
+      }
+      throw error;
+    }
   }
 
   private generateUniqueId(filePath: string): string {
@@ -165,14 +186,15 @@ export class PDFProcessor {
 
       // Check if the path is a URL
       if (filePath.startsWith('http://') || filePath.startsWith('https://')) {
-        // Fetch the PDF from URL
-        const response = await fetch(filePath);
+        // Fetch the PDF from URL with timeout
+        const response = await this.fetchWithTimeout(filePath);
         if (!response.ok) {
           throw new Error(`Failed to fetch PDF from URL: ${response.status} ${response.statusText}`);
         }
 
         const arrayBuffer = await response.arrayBuffer();
         dataBuffer = Buffer.from(arrayBuffer);
+        console.error(`✓ PDF downloaded (${(dataBuffer.length / 1024 / 1024).toFixed(2)} MB)`);
       } else {
         // Read from local file system
         dataBuffer = await readFile(filePath);
@@ -243,13 +265,15 @@ export class PDFProcessor {
       
       doc.destroy();
 
+      const markdown = this.convertToMarkdown(pages, outline);
+
       const id = this.generateUniqueId(filePath);
 
       this.loadedPDFs.set(id, {
         id,
         path: filePath,
         pageCount: numPages,
-        pages,
+        markdown,
         metadata,
         outline,
       });
@@ -319,40 +343,141 @@ export class PDFProcessor {
     return null;
   }
 
-  async extractPage(pdfId: string, pageNumber: number): Promise<string> {
-    const pdf = this.loadedPDFs.get(pdfId);
-    if (!pdf) {
-      throw new Error("PDF not found. Please load it first.");
+  private convertToMarkdown(pages: string[], outline?: OutlineItem[]): string {
+    if (!outline || outline.length === 0) {
+      return pages.join('\n\n');
     }
-    
-    if (pageNumber < 1 || pageNumber > pdf.pageCount) {
-      throw new Error(`Invalid page number. PDF has ${pdf.pageCount} pages.`);
+
+    interface FlatSection {
+      title: string;
+      level: number;
+      startPage: number;
+      endPage: number;
     }
-    
-    return pdf.pages[pageNumber - 1] || "";
+
+    const flattenOutline = (items: OutlineItem[], parentLevel: number = 0): FlatSection[] => {
+      const sections: FlatSection[] = [];
+
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.page) {
+          const nextItem = items[i + 1];
+          const endPage = nextItem?.page ? nextItem.page - 1 : pages.length;
+
+          sections.push({
+            title: item.title,
+            level: item.level,
+            startPage: item.page,
+            endPage: endPage,
+          });
+        }
+
+        if (item.children && item.children.length > 0) {
+          sections.push(...flattenOutline(item.children, item.level));
+        }
+      }
+
+      return sections;
+    };
+
+    const sections = flattenOutline(outline);
+    sections.sort((a, b) => a.startPage - b.startPage);
+
+    let markdown = '';
+    let lastEndPage = 0;
+
+    for (const section of sections) {
+      if (section.startPage > lastEndPage + 1) {
+        for (let p = lastEndPage + 1; p < section.startPage; p++) {
+          if (pages[p - 1]?.trim()) {
+            markdown += pages[p - 1] + '\n\n';
+          }
+        }
+      }
+
+      const headingPrefix = '#'.repeat(section.level + 1);
+      markdown += `${headingPrefix} ${section.title}\n\n`;
+
+      for (let p = section.startPage; p <= section.endPage; p++) {
+        if (pages[p - 1]?.trim()) {
+          markdown += pages[p - 1] + '\n\n';
+        }
+      }
+
+      lastEndPage = section.endPage;
+    }
+
+    if (lastEndPage < pages.length) {
+      for (let p = lastEndPage + 1; p <= pages.length; p++) {
+        if (pages[p - 1]?.trim()) {
+          markdown += pages[p - 1] + '\n\n';
+        }
+      }
+    }
+
+    return markdown.trim();
   }
 
-  async extractRange(
-    pdfId: string,
-    startPage: number,
-    endPage: number
-  ): Promise<string> {
+  async extractSection(pdfId: string, sectionTitle: string): Promise<string> {
     const pdf = this.loadedPDFs.get(pdfId);
     if (!pdf) {
       throw new Error("PDF not found. Please load it first.");
     }
-    
-    if (startPage < 1 || endPage > pdf.pageCount || startPage > endPage) {
-      throw new Error(`Invalid page range. PDF has ${pdf.pageCount} pages.`);
+
+    const normalizedQuery = sectionTitle.toLowerCase().trim();
+    const lines = pdf.markdown.split('\n');
+
+    let sectionStart = -1;
+    let sectionLevel = 0;
+    let sectionEnd = lines.length;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const headingMatch = line.match(/^(#+)\s+(.+)$/);
+
+      if (headingMatch) {
+        const level = headingMatch[1].length;
+        const title = headingMatch[2].toLowerCase().trim();
+
+        if (sectionStart === -1) {
+          if (title.includes(normalizedQuery) || normalizedQuery.includes(title)) {
+            sectionStart = i;
+            sectionLevel = level;
+          }
+        } else {
+          if (level <= sectionLevel) {
+            sectionEnd = i;
+            break;
+          }
+        }
+      }
     }
-    
-    const pages: string[] = [];
-    for (let i = startPage; i <= endPage; i++) {
-      pages.push(`--- Page ${i} ---\n${pdf.pages[i - 1] || ""}`);
+
+    if (sectionStart === -1) {
+      const suggestions = this.findSimilarSections(pdf.markdown, sectionTitle);
+      const suggestionText = suggestions.length > 0
+        ? `\n\nDid you mean one of these?\n${suggestions.map(s => `  - ${s}`).join('\n')}`
+        : '';
+      throw new Error(`Section "${sectionTitle}" not found in outline.${suggestionText}`);
     }
-    
-    return pages.join("\n\n");
+
+    return lines.slice(sectionStart, sectionEnd).join('\n').trim();
   }
+
+  private findSimilarSections(markdown: string, query: string): string[] {
+    const lines = markdown.split('\n');
+    const sections: string[] = [];
+
+    for (const line of lines) {
+      const headingMatch = line.match(/^#+\s+(.+)$/);
+      if (headingMatch) {
+        sections.push(headingMatch[1]);
+      }
+    }
+
+    return sections.slice(0, 5);
+  }
+
 
   async searchPDF(
     pdfId: string,
@@ -367,11 +492,24 @@ export class PDFProcessor {
       throw new Error("PDF not found. Please load it first.");
     }
 
-    const results: SearchResult[] = [];
+    const findSectionForPosition = (position: number): string => {
+      const textBeforeMatch = pdf.markdown.substring(0, position);
+      const lines = textBeforeMatch.split('\n');
+
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const headingMatch = lines[i].match(/^#+\s+(.+)$/);
+        if (headingMatch) {
+          return headingMatch[1];
+        }
+      }
+
+      return 'Document Start';
+    };
+
+    const matches: Array<{ text: string; context: string; section: string }> = [];
     let totalMatches = 0;
 
     if (regex) {
-      // Regex search
       let regexPattern: RegExp;
       try {
         regexPattern = new RegExp(query, caseSensitive ? 'g' : 'gi');
@@ -379,88 +517,78 @@ export class PDFProcessor {
         throw new Error(`Invalid regular expression: ${query}`);
       }
 
-      for (let index = 0; index < pdf.pages.length; index++) {
-        const pageText = pdf.pages[index];
-        const matches: Array<{ text: string; context: string }> = [];
-        let match: RegExpExecArray | null;
+      let match: RegExpExecArray | null;
+      regexPattern.lastIndex = 0;
 
-        // Reset lastIndex for each page
-        regexPattern.lastIndex = 0;
-
-        while ((match = regexPattern.exec(pageText)) !== null) {
-          if (maxResults && totalMatches >= maxResults) {
-            break;
-          }
-
-          const position = match.index;
-          const matchedText = match[0];
-          const contextStart = Math.max(0, position - contextChars);
-          const contextEnd = Math.min(pageText.length, position + matchedText.length + contextChars);
-          const context = pageText.substring(contextStart, contextEnd);
-
-          matches.push({
-            text: matchedText,
-            context: context.trim(),
-          });
-
-          totalMatches++;
-
-          // Prevent infinite loop for zero-width matches
-          if (match.index === regexPattern.lastIndex) {
-            regexPattern.lastIndex++;
-          }
-        }
-
-        if (matches.length > 0) {
-          results.push({
-            page: index + 1,
-            matches,
-          });
-        }
-
+      while ((match = regexPattern.exec(pdf.markdown)) !== null) {
         if (maxResults && totalMatches >= maxResults) {
           break;
+        }
+
+        const position = match.index;
+        const matchedText = match[0];
+        const contextStart = Math.max(0, position - contextChars);
+        const contextEnd = Math.min(pdf.markdown.length, position + matchedText.length + contextChars);
+        const context = pdf.markdown.substring(contextStart, contextEnd);
+        const section = findSectionForPosition(position);
+
+        matches.push({
+          text: matchedText,
+          context: context.trim(),
+          section,
+        });
+
+        totalMatches++;
+
+        if (match.index === regexPattern.lastIndex) {
+          regexPattern.lastIndex++;
         }
       }
     } else {
-      // Plain text search
-      const searchQuery = caseSensitive ? query : query.toLowerCase();
+      const searchText = caseSensitive ? query : query.toLowerCase();
+      const markdownText = caseSensitive ? pdf.markdown : pdf.markdown.toLowerCase();
 
-      for (let index = 0; index < pdf.pages.length; index++) {
-        const pageText = pdf.pages[index];
-        const searchText = caseSensitive ? pageText : pageText.toLowerCase();
-        const matches: Array<{ text: string; context: string }> = [];
-
-        let position = 0;
-        while ((position = searchText.indexOf(searchQuery, position)) !== -1) {
-          if (maxResults && totalMatches >= maxResults) {
-            break;
-          }
-
-          const contextStart = Math.max(0, position - contextChars);
-          const contextEnd = Math.min(pageText.length, position + searchQuery.length + contextChars);
-          const context = pageText.substring(contextStart, contextEnd);
-
-          matches.push({
-            text: pageText.substring(position, position + query.length),
-            context: context.trim(),
-          });
-
-          totalMatches++;
-          position += searchQuery.length;
-        }
-
-        if (matches.length > 0) {
-          results.push({
-            page: index + 1,
-            matches,
-          });
-        }
-
+      let position = 0;
+      while ((position = markdownText.indexOf(searchText, position)) !== -1) {
         if (maxResults && totalMatches >= maxResults) {
           break;
         }
+
+        const matchedText = pdf.markdown.substring(position, position + query.length);
+        const contextStart = Math.max(0, position - contextChars);
+        const contextEnd = Math.min(pdf.markdown.length, position + query.length + contextChars);
+        const context = pdf.markdown.substring(contextStart, contextEnd);
+        const section = findSectionForPosition(position);
+
+        matches.push({
+          text: matchedText,
+          context: context.trim(),
+          section,
+        });
+
+        totalMatches++;
+        position += query.length;
       }
+    }
+
+    if (matches.length === 0) {
+      return [];
+    }
+
+    const groupedBySection: Map<string, Array<{ text: string; context: string }>> = new Map();
+    for (const match of matches) {
+      const sectionMatches = groupedBySection.get(match.section) || [];
+      sectionMatches.push({ text: match.text, context: match.context });
+      groupedBySection.set(match.section, sectionMatches);
+    }
+
+    const results: SearchResult[] = [];
+    for (const [section, sectionMatches] of groupedBySection) {
+      results.push({
+        page: 0,
+        section,
+        matches: sectionMatches,
+      });
     }
 
     return results;
@@ -545,7 +673,10 @@ export class PDFProcessor {
     // Reload the document to access images
     let dataBuffer: Buffer;
     if (pdf.path.startsWith('http://') || pdf.path.startsWith('https://')) {
-      const response = await fetch(pdf.path);
+      const response = await this.fetchWithTimeout(pdf.path);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch PDF: ${response.status} ${response.statusText}`);
+      }
       const arrayBuffer = await response.arrayBuffer();
       dataBuffer = Buffer.from(arrayBuffer);
     } else {
@@ -637,7 +768,10 @@ export class PDFProcessor {
     // Reload the document to access images
     let dataBuffer: Buffer;
     if (pdf.path.startsWith('http://') || pdf.path.startsWith('https://')) {
-      const response = await fetch(pdf.path);
+      const response = await this.fetchWithTimeout(pdf.path);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch PDF: ${response.status} ${response.statusText}`);
+      }
       const arrayBuffer = await response.arrayBuffer();
       dataBuffer = Buffer.from(arrayBuffer);
     } else {
@@ -824,7 +958,10 @@ export class PDFProcessor {
     // Reload the document for rendering
     let dataBuffer: Buffer;
     if (pdf.path.startsWith('http://') || pdf.path.startsWith('https://')) {
-      const response = await fetch(pdf.path);
+      const response = await this.fetchWithTimeout(pdf.path);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch PDF: ${response.status} ${response.statusText}`);
+      }
       const arrayBuffer = await response.arrayBuffer();
       dataBuffer = Buffer.from(arrayBuffer);
     } else {
@@ -905,7 +1042,10 @@ export class PDFProcessor {
     // Load the document once for all pages
     let dataBuffer: Buffer;
     if (pdf.path.startsWith('http://') || pdf.path.startsWith('https://')) {
-      const response = await fetch(pdf.path);
+      const response = await this.fetchWithTimeout(pdf.path);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch PDF: ${response.status} ${response.statusText}`);
+      }
       const arrayBuffer = await response.arrayBuffer();
       dataBuffer = Buffer.from(arrayBuffer);
     } else {

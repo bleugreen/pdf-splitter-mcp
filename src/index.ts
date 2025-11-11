@@ -40,8 +40,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
-        name: "load_pdf",
-        description: "Load a PDF file into memory for processing. Supports both local file paths and URLs (http/https). Returns a filename-based ID for subsequent operations.",
+        name: "load",
+        description: "Load a PDF and convert it to structured markdown using the document's outline. Returns filename-based ID and table of contents.",
         inputSchema: {
           type: "object",
           properties: {
@@ -54,54 +54,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
-        name: "extract_page",
-        description: "Extract content from a specific page",
+        name: "section",
+        description: "Extract a specific section by title (case-insensitive fuzzy match). Returns the section with all its content as markdown.",
         inputSchema: {
           type: "object",
           properties: {
-            pdfId: {
+            id: {
               type: "string",
-              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
+              description: "Filename-based ID of the loaded PDF",
             },
-            pageNumber: {
-              type: "number",
-              description: "Page number to extract (1-indexed)",
+            title: {
+              type: "string",
+              description: "Section title to extract (fuzzy matched against outline headings)",
             },
           },
-          required: ["pdfId", "pageNumber"],
+          required: ["id", "title"],
         },
       },
       {
-        name: "extract_range",
-        description: "Extract content from a range of pages",
+        name: "search",
+        description: "Search for text across the entire document. Results are grouped by section with configurable limits and context.",
         inputSchema: {
           type: "object",
           properties: {
-            pdfId: {
+            id: {
               type: "string",
-              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
-            },
-            startPage: {
-              type: "number",
-              description: "Starting page number (1-indexed)",
-            },
-            endPage: {
-              type: "number",
-              description: "Ending page number (1-indexed)",
-            },
-          },
-          required: ["pdfId", "startPage", "endPage"],
-        },
-      },
-      {
-        name: "search_pdf",
-        description: "Search for text within the PDF with configurable result limits and context",
-        inputSchema: {
-          type: "object",
-          properties: {
-            pdfId: {
-              type: "string",
-              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
+              description: "Filename-based ID of the loaded PDF",
             },
             query: {
               type: "string",
@@ -119,7 +97,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             maxResults: {
               type: "number",
-              description: "Maximum number of matches to return (default: unlimited). Useful for limiting token usage.",
+              description: "Maximum number of matches to return (default: unlimited)",
             },
             contextChars: {
               type: "number",
@@ -127,71 +105,71 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               default: 50,
             },
           },
-          required: ["pdfId", "query"],
+          required: ["id", "query"],
         },
       },
       {
-        name: "get_pdf_info",
+        name: "outline",
+        description: "Get the document's table of contents with section titles",
+        inputSchema: {
+          type: "object",
+          properties: {
+            id: {
+              type: "string",
+              description: "Filename-based ID of the loaded PDF",
+            },
+          },
+          required: ["id"],
+        },
+      },
+      {
+        name: "info",
         description: "Get metadata and information about a loaded PDF",
         inputSchema: {
           type: "object",
           properties: {
-            pdfId: {
+            id: {
               type: "string",
-              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
+              description: "Filename-based ID of the loaded PDF",
             },
           },
-          required: ["pdfId"],
+          required: ["id"],
         },
       },
       {
-        name: "list_loaded_pdfs",
-        description: "List all currently loaded PDFs",
+        name: "library",
+        description: "List all currently loaded PDFs in your library",
         inputSchema: {
           type: "object",
           properties: {},
         },
       },
       {
-        name: "unload_pdf",
+        name: "unload",
         description: "Unload a PDF from memory",
         inputSchema: {
           type: "object",
           properties: {
-            pdfId: {
+            id: {
               type: "string",
-              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
+              description: "Filename-based ID of the loaded PDF",
             },
           },
-          required: ["pdfId"],
+          required: ["id"],
         },
       },
       {
-        name: "extract_outline",
-        description: "Extract the document outline/TOC with page numbers",
+        name: "images",
+        description: "List all images in the PDF with their metadata (page, dimensions, format)",
         inputSchema: {
           type: "object",
           properties: {
-            pdfId: {
+            id: {
               type: "string",
-              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
+              description: "Filename-based ID of the loaded PDF",
             },
           },
-          required: ["pdfId"],
-        },
-      },
-      {
-        name: "list_images",
-        description: "List all images in the PDF with their metadata",
-        inputSchema: {
-          type: "object",
-          properties: {
-            pdfId: {
-              type: "string",
-              description: "Filename-based ID of the loaded PDF (e.g., 'document.pdf' or 'folder/document.pdf')",
-            },
-          },
-          required: ["pdfId"],
+          required: ["id"],
         },
       },
       {
@@ -344,12 +322,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
     switch (name) {
-      case "load_pdf": {
+      case "load": {
         const { path } = args as { path: string };
         const result = await pdfProcessor.loadPDF(path);
         const outline = await pdfProcessor.getFormattedOutline(result.id);
 
-        let responseText = `PDF loaded successfully.\nID: ${result.id}\nPages: ${result.pageCount}\n\nUse this ID (${result.id}) in subsequent operations.`;
+        let responseText = `PDF loaded and converted to markdown.\nID: ${result.id}\nPages: ${result.pageCount}\n\nUse section('${result.id}', 'title') to extract specific sections.`;
 
         if (outline && outline !== "No outline/TOC found in this PDF.") {
           responseText += `\n\nTable of Contents:\n${outline}`;
@@ -365,12 +343,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case "extract_page": {
-        const { pdfId, pageNumber } = args as {
-          pdfId: string;
-          pageNumber: number;
+      case "section": {
+        const { id, title } = args as {
+          id: string;
+          title: string;
         };
-        const content = await pdfProcessor.extractPage(pdfId, pageNumber);
+        const content = await pdfProcessor.extractSection(id, title);
         return {
           content: [
             {
@@ -381,30 +359,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case "extract_range": {
-        const { pdfId, startPage, endPage } = args as {
-          pdfId: string;
-          startPage: number;
-          endPage: number;
-        };
-        const content = await pdfProcessor.extractRange(
-          pdfId,
-          startPage,
-          endPage
-        );
-        return {
-          content: [
-            {
-              type: "text",
-              text: content,
-            },
-          ],
-        };
-      }
-
-      case "search_pdf": {
-        const { pdfId, query, caseSensitive = false, regex = false, maxResults, contextChars = 50 } = args as {
-          pdfId: string;
+      case "search": {
+        const { id, query, caseSensitive = false, regex = false, maxResults, contextChars = 50 } = args as {
+          id: string;
           query: string;
           caseSensitive?: boolean;
           regex?: boolean;
@@ -412,7 +369,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           contextChars?: number;
         };
         const results = await pdfProcessor.searchPDF(
-          pdfId,
+          id,
           query,
           caseSensitive,
           regex,
@@ -429,9 +386,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case "get_pdf_info": {
-        const { pdfId } = args as { pdfId: string };
-        const info = await pdfProcessor.getPDFInfo(pdfId);
+      case "outline": {
+        const { id } = args as { id: string };
+        const outline = await pdfProcessor.getFormattedOutline(id);
+        return {
+          content: [
+            {
+              type: "text",
+              text: outline,
+            },
+          ],
+        };
+      }
+
+      case "info": {
+        const { id } = args as { id: string };
+        const info = await pdfProcessor.getPDFInfo(id);
         return {
           content: [
             {
@@ -442,7 +412,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case "list_loaded_pdfs": {
+      case "library": {
         const pdfs = await pdfProcessor.listLoadedPDFs();
         return {
           content: [
@@ -454,39 +424,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case "unload_pdf": {
-        const { pdfId } = args as { pdfId: string };
-        const removed = await pdfProcessor.unloadPDF(pdfId);
+      case "unload": {
+        const { id } = args as { id: string };
+        const removed = await pdfProcessor.unloadPDF(id);
         if (removed) {
           return {
             content: [
               {
                 type: "text",
-                text: `PDF ${pdfId} unloaded successfully.`,
+                text: `PDF ${id} unloaded successfully.`,
               },
             ],
           };
         } else {
-          throw new Error(`PDF ${pdfId} not found.`);
+          throw new Error(`PDF ${id} not found.`);
         }
       }
 
-      case "extract_outline": {
-        const { pdfId } = args as { pdfId: string };
-        const outline = await pdfProcessor.getFormattedOutline(pdfId);
-        return {
-          content: [
-            {
-              type: "text",
-              text: outline,
-            },
-          ],
-        };
-      }
-
-      case "list_images": {
-        const { pdfId } = args as { pdfId: string };
-        const images = await pdfProcessor.listImages(pdfId);
+      case "images": {
+        const { id } = args as { id: string };
+        const images = await pdfProcessor.listImages(id);
         return {
           content: [
             {
