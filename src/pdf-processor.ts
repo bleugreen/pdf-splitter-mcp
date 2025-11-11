@@ -358,15 +358,18 @@ export class PDFProcessor {
     pdfId: string,
     query: string,
     caseSensitive: boolean = false,
-    regex: boolean = false
+    regex: boolean = false,
+    maxResults?: number,
+    contextChars: number = 50
   ): Promise<SearchResult[]> {
     const pdf = this.loadedPDFs.get(pdfId);
     if (!pdf) {
       throw new Error("PDF not found. Please load it first.");
     }
-    
+
     const results: SearchResult[] = [];
-    
+    let totalMatches = 0;
+
     if (regex) {
       // Regex search
       let regexPattern: RegExp;
@@ -375,70 +378,91 @@ export class PDFProcessor {
       } catch (error) {
         throw new Error(`Invalid regular expression: ${query}`);
       }
-      
-      pdf.pages.forEach((pageText, index) => {
+
+      for (let index = 0; index < pdf.pages.length; index++) {
+        const pageText = pdf.pages[index];
         const matches: Array<{ text: string; context: string }> = [];
         let match: RegExpExecArray | null;
-        
+
         // Reset lastIndex for each page
         regexPattern.lastIndex = 0;
-        
+
         while ((match = regexPattern.exec(pageText)) !== null) {
+          if (maxResults && totalMatches >= maxResults) {
+            break;
+          }
+
           const position = match.index;
           const matchedText = match[0];
-          const contextStart = Math.max(0, position - 50);
-          const contextEnd = Math.min(pageText.length, position + matchedText.length + 50);
+          const contextStart = Math.max(0, position - contextChars);
+          const contextEnd = Math.min(pageText.length, position + matchedText.length + contextChars);
           const context = pageText.substring(contextStart, contextEnd);
-          
+
           matches.push({
             text: matchedText,
             context: context.trim(),
           });
-          
+
+          totalMatches++;
+
           // Prevent infinite loop for zero-width matches
           if (match.index === regexPattern.lastIndex) {
             regexPattern.lastIndex++;
           }
         }
-        
+
         if (matches.length > 0) {
           results.push({
             page: index + 1,
             matches,
           });
         }
-      });
+
+        if (maxResults && totalMatches >= maxResults) {
+          break;
+        }
+      }
     } else {
-      // Plain text search (existing logic)
+      // Plain text search
       const searchQuery = caseSensitive ? query : query.toLowerCase();
-      
-      pdf.pages.forEach((pageText, index) => {
+
+      for (let index = 0; index < pdf.pages.length; index++) {
+        const pageText = pdf.pages[index];
         const searchText = caseSensitive ? pageText : pageText.toLowerCase();
         const matches: Array<{ text: string; context: string }> = [];
-        
+
         let position = 0;
         while ((position = searchText.indexOf(searchQuery, position)) !== -1) {
-          const contextStart = Math.max(0, position - 50);
-          const contextEnd = Math.min(pageText.length, position + searchQuery.length + 50);
+          if (maxResults && totalMatches >= maxResults) {
+            break;
+          }
+
+          const contextStart = Math.max(0, position - contextChars);
+          const contextEnd = Math.min(pageText.length, position + searchQuery.length + contextChars);
           const context = pageText.substring(contextStart, contextEnd);
-          
+
           matches.push({
             text: pageText.substring(position, position + query.length),
             context: context.trim(),
           });
-          
+
+          totalMatches++;
           position += searchQuery.length;
         }
-        
+
         if (matches.length > 0) {
           results.push({
             page: index + 1,
             matches,
           });
         }
-      });
+
+        if (maxResults && totalMatches >= maxResults) {
+          break;
+        }
+      }
     }
-    
+
     return results;
   }
 
@@ -517,7 +541,7 @@ export class PDFProcessor {
     }
 
     const images: ImageInfo[] = [];
-    
+
     // Reload the document to access images
     let dataBuffer: Buffer;
     if (pdf.path.startsWith('http://') || pdf.path.startsWith('https://')) {
@@ -527,7 +551,7 @@ export class PDFProcessor {
     } else {
       dataBuffer = await readFile(pdf.path);
     }
-    
+
     const uint8Array = new Uint8Array(dataBuffer);
     const doc = await pdfjsLib.getDocument({
       data: uint8Array,
@@ -539,11 +563,64 @@ export class PDFProcessor {
     try {
       for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
         const page = await doc.getPage(pageNum);
-        const pageImages = await this.extractImagesFromPage(page, pageNum, 0); // Don't render pages, just list embedded images
+        const pageImages = await this.listImagesFromPage(page, pageNum);
         images.push(...pageImages);
       }
     } finally {
       doc.destroy();
+    }
+
+    return images;
+  }
+
+  private async listImagesFromPage(page: PDFPageProxy, pageNum: number): Promise<ImageInfo[]> {
+    const images: ImageInfo[] = [];
+    const ops = await page.getOperatorList();
+
+    let imageIndex = 0;
+
+    // Only list embedded images metadata, don't extract data
+    for (let i = 0; i < ops.fnArray.length; i++) {
+      const fn = ops.fnArray[i];
+      const args = ops.argsArray[i];
+
+      // OPS.paintImageXObject = 85, OPS.paintJpegXObject = 82, OPS.paintImageMaskXObject = 83
+      if (fn === 85 || fn === 82 || fn === 83) {
+        const imageName = args[0];
+
+        try {
+          const imageObj = await page.objs.get(imageName);
+          if (imageObj && imageObj.width && imageObj.height) {
+            let format = 'unknown';
+
+            // Determine format without extracting data
+            if (imageObj.data && imageObj.data.length > 0) {
+              const data = new Uint8Array(imageObj.data);
+
+              // Check for JPEG
+              if (data[0] === 0xFF && data[1] === 0xD8) {
+                format = 'jpeg';
+              }
+              // Check for PNG
+              else if (data[0] === 0x89 && data[1] === 0x50) {
+                format = 'png';
+              } else {
+                format = 'raw';
+              }
+            }
+
+            images.push({
+              page: pageNum,
+              index: imageIndex++,
+              width: imageObj.width,
+              height: imageObj.height,
+              format: format,
+            });
+          }
+        } catch (error) {
+          console.warn(`Failed to get image metadata ${imageName} on page ${pageNum}:`, error);
+        }
+      }
     }
 
     return images;
@@ -812,9 +889,9 @@ export class PDFProcessor {
   }
 
   async renderPages(
-    pdfId: string, 
-    pageNumbers?: number[], 
-    dpi: number = 96, 
+    pdfId: string,
+    pageNumbers?: number[],
+    dpi: number = 96,
     format: 'png' | 'jpeg' = 'png'
   ): Promise<RenderedPage[]> {
     const pdf = this.loadedPDFs.get(pdfId);
@@ -825,15 +902,74 @@ export class PDFProcessor {
     const pages = pageNumbers || Array.from({ length: pdf.pageCount }, (_, i) => i + 1);
     const renderedPages: RenderedPage[] = [];
 
-    for (const pageNum of pages) {
-      if (pageNum >= 1 && pageNum <= pdf.pageCount) {
+    // Load the document once for all pages
+    let dataBuffer: Buffer;
+    if (pdf.path.startsWith('http://') || pdf.path.startsWith('https://')) {
+      const response = await fetch(pdf.path);
+      const arrayBuffer = await response.arrayBuffer();
+      dataBuffer = Buffer.from(arrayBuffer);
+    } else {
+      dataBuffer = await readFile(pdf.path);
+    }
+
+    const uint8Array = new Uint8Array(dataBuffer);
+    const doc = await pdfjsLib.getDocument({
+      data: uint8Array,
+      useWorkerFetch: false,
+      isEvalSupported: false,
+      useSystemFonts: true,
+    }).promise;
+
+    try {
+      for (const pageNum of pages) {
+        if (pageNum < 1 || pageNum > pdf.pageCount) {
+          continue;
+        }
+
         try {
-          const renderedPage = await this.renderPage(pdfId, pageNum, dpi, format);
-          renderedPages.push(renderedPage);
+          const page = await doc.getPage(pageNum);
+
+          const scale = dpi / 72;
+          const viewport = page.getViewport({ scale });
+
+          let canvas: any;
+          let ctx: any;
+
+          try {
+            const { createCanvas: createNapiCanvas } = await import('@napi-rs/canvas');
+            canvas = createNapiCanvas(Math.round(viewport.width), Math.round(viewport.height));
+            ctx = canvas.getContext('2d');
+          } catch {
+            canvas = createCanvas(Math.round(viewport.width), Math.round(viewport.height));
+            ctx = canvas.getContext('2d');
+          }
+
+          await page.render({
+            canvasContext: ctx,
+            viewport: viewport,
+          }).promise;
+
+          let imageBuffer: Buffer;
+          if (format === 'jpeg') {
+            imageBuffer = canvas.toBuffer('image/jpeg', { quality: 0.95 });
+          } else {
+            imageBuffer = canvas.toBuffer('image/png');
+          }
+
+          renderedPages.push({
+            page: pageNum,
+            width: Math.round(viewport.width),
+            height: Math.round(viewport.height),
+            format: format,
+            base64: imageBuffer.toString('base64'),
+            dpi: dpi,
+          });
         } catch (error) {
           console.warn(`Failed to render page ${pageNum}:`, error);
         }
       }
+    } finally {
+      doc.destroy();
     }
 
     return renderedPages;

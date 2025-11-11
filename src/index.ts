@@ -95,7 +95,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "search_pdf",
-        description: "Search for text within the PDF",
+        description: "Search for text within the PDF with configurable result limits and context",
         inputSchema: {
           type: "object",
           properties: {
@@ -116,6 +116,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "boolean",
               description: "Whether to treat the query as a regular expression",
               default: false,
+            },
+            maxResults: {
+              type: "number",
+              description: "Maximum number of matches to return (default: unlimited). Useful for limiting token usage.",
+            },
+            contextChars: {
+              type: "number",
+              description: "Number of characters to include before and after each match for context (default: 50)",
+              default: 50,
             },
           },
           required: ["pdfId", "query"],
@@ -394,17 +403,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "search_pdf": {
-        const { pdfId, query, caseSensitive = false, regex = false } = args as {
+        const { pdfId, query, caseSensitive = false, regex = false, maxResults, contextChars = 50 } = args as {
           pdfId: string;
           query: string;
           caseSensitive?: boolean;
           regex?: boolean;
+          maxResults?: number;
+          contextChars?: number;
         };
         const results = await pdfProcessor.searchPDF(
           pdfId,
           query,
           caseSensitive,
-          regex
+          regex,
+          maxResults,
+          contextChars
         );
         return {
           content: [
