@@ -338,11 +338,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "load_pdf": {
         const { path } = args as { path: string };
         const result = await pdfProcessor.loadPDF(path);
+        const outline = await pdfProcessor.getFormattedOutline(result.id);
+
+        let responseText = `PDF loaded successfully.\nID: ${result.id}\nPages: ${result.pageCount}\n\nUse this ID (${result.id}) in subsequent operations.`;
+
+        if (outline && outline !== "No outline/TOC found in this PDF.") {
+          responseText += `\n\nTable of Contents:\n${outline}`;
+        }
+
         return {
           content: [
             {
               type: "text",
-              text: `PDF loaded successfully.\nID: ${result.id}\nPages: ${result.pageCount}\n\nUse this ID (${result.id}) in subsequent operations.`,
+              text: responseText,
             },
           ],
         };
